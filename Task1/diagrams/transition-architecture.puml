@@ -1,0 +1,57 @@
+@startuml transition-architecture
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Container.puml
+
+LAYOUT_WITH_LEGEND()
+LAYOUT_LEFT_RIGHT()
+
+title Контейнерная диаграмма: Переходная архитектура (Transition Architecture — 3 месяца)
+
+Person(client, "Клиент Fast Cargo", "Создает заказы, отслеживает доставку")
+Person(courier, "Курьер / Водитель", "Получает маршрутные листы, меняет статусы")
+Person(analyst_corp, "Аналитики холдинга", "Анализируют логистику в DWH")
+
+System_Boundary(fast_cargo_transition, "ИТ-ландшафт Fast Cargo (Переходное состояние — 3 мес)") {
+    Container(lk_web, "Личный кабинет (Web)", "React / SPA", "Интерфейс клиентов")
+    Container(courier_app, "Мобильное приложение курьера", "React Native", "Интерфейс курьеров")
+    Container(bff_gateway, "Интеграционный шлюз (BFF)", "Node.js / Express", "Маршрутизация запросов к монолиту")
+    
+    Container_Boundary(legacy_monolith, "Легаси-монолит Fast Cargo (Бэк-офис)") {
+        Container(order_mod, "Order Module", "Java / Spring", "Обработка заказов")
+        Container(wms_mod, "WMS Module", "Java / Spring", "Складской учёт")
+        Container(delivery_mod, "Delivery Module", "Java / Spring", "Маршрутизация доставки")
+        Container(billing_mod, "Billing Module", "Java / Spring", "Биллинг и акты")
+    }
+    
+    ContainerDb(primary_db, "Операционная БД (Master)", "PostgreSQL 15 (WAL Logical)", "Транзакционная БД. Нагрузка изолирована от аналитики")
+    ContainerDb(read_replica_db, "Read-Replica БД (Локальная)", "PostgreSQL 15 (Streaming Replica)", "Разгрузка локальных тяжелых SQL-отчетов Fast Cargo")
+    
+    System_Boundary(cdc_pipeline, "Асинхронный конвейер репликации (CDC)") {
+        Container(debezium, "Debezium Connect (CDC)", "Kafka Connect / Debezium", "Чтение WAL-логов без SQL-нагрузки на Master БД (задержка < 500 мс)")
+        Container(kafka_buffer, "Шина событий (Kafka)", "Apache Kafka", "Буферизация потока изменений таблиц (Orders, WMS, Delivery)")
+        Container(dwh_sink, "ClickHouse Sink Connector", "Kafka Connect", "Потоковая заливка в DWH холдинга")
+    }
+}
+
+System_Ext(holding_dwh, "DWH Холдинга «Продукты с душой»", "ClickHouse / Greenplum", "Корпоративное аналитическое хранилище (Свежесть данных < 5 сек)")
+
+' Связи пользователей
+Rel(client, lk_web, "Использует", "HTTPS")
+Rel(courier, courier_app, "Использует", "HTTPS")
+Rel(lk_web, bff_gateway, "API-запросы", "JSON/HTTPS")
+Rel(courier_app, bff_gateway, "Статусы и гео", "JSON/HTTPS")
+
+' Монолит и БД
+Rel(bff_gateway, legacy_monolith, "Синхронные вызовы", "REST/JSON")
+Rel(legacy_monolith, primary_db, "Транзакционные чтение/запись", "JDBC (Port 5432)")
+Rel(legacy_monolith, read_replica_db, "Тяжелые локальные SELECT-отчеты", "JDBC (Port 5433)")
+Rel(primary_db, read_replica_db, "Физическая репликация", "Streaming Replication")
+
+' CDC конвейер
+Rel(primary_db, debezium, "Чтение WAL-логов через pgoutput", "Replication Protocol (Non-blocking)")
+Rel(debezium, kafka_buffer, "Публикация change-events", "Avro / Kafka Protocol")
+Rel(kafka_buffer, dwh_sink, "Потоковое чтение", "Consumer API")
+Rel(dwh_sink, holding_dwh, "Пакетная вставка (Batch Insert)", "Native TCP / HTTP")
+
+Rel(analyst_corp, holding_dwh, "Аналитические BI-отчеты", "SQL / Tableau")
+
+@enduml

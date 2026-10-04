@@ -1,0 +1,74 @@
+@startuml target-architecture
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Container.puml
+
+LAYOUT_WITH_LEGEND()
+
+title Контейнерная диаграмма: Целевая архитектура (Target Architecture — 1 год, Event-Driven)
+
+Person(client, "Клиент", "Веб / Мобильное приложение")
+Person(courier, "Курьер", "Мобильное приложение курьера")
+Person(operator_crm, "Оператор CRM холдинга", "Контакт-центр «Продукты с душой»")
+
+System_Ext(holding_crm, "Омниканальная CRM холдинга", "REST / WebSocket", "Запрос статусов заказов и курьеров (< 1 сек)")
+System_Ext(edi_suppliers, "Поставщики и партнеры (EDI)", "JSON over HTTPS", "Обмен накладными DESADV, заказами ORDERS, отчетами INVRPT")
+System_Ext(iot_devices, "IoT Трекеры и Термодатчики", "MQTT / TLS", "Телеметрия с автопарка и термобоксов (3 000 RPS)")
+System_Ext(holding_dwh, "Корпоративное DWH холдинга", "ClickHouse", "Аналитика логистики и свежести в реальном времени")
+
+System_Boundary(fast_cargo_target, "Целевой ИТ-ландшафт Fast Cargo (Kubernetes Cluster / Multi-AZ)") {
+    Container(api_gateway, "API Gateway / BFF", "Traefik / Envoy", "Маршрутизация, Rate Limiting, OAuth2/JWT аутентификация")
+    Container(mqtt_broker, "IoT Ingestion Gateway", "EMQX Cluster / MQTT", "Приём телеметрии 3 000 RPS, валидация пакетов")
+    Container(kafka_backbone, "Event Streaming Backbone", "Apache Kafka (Strimzi / 3 AZ)", "Центральная шина событий, топики доменов, Event Sourcing")
+    
+    Container_Boundary(pii_secure_zone, "Изолированный контур ПДн (ФЗ-152 УЗ-1)") {
+        Container(pii_service, "Customer Profiles & PII Service", "Go / gRPC", "Хранение и управление персональными данными (ФИО, телефон, адрес)")
+        ContainerDb(pii_db, "PII Vault DB", "PostgreSQL (Шифрование ГОСТ)", "Зашифрованная база персональных данных")
+    }
+
+    System_Boundary(domain_services, "Доменные микросервисы (Database-per-Service)") {
+        Container(orders_svc, "Orders Service", "Java / Spring Boot", "Жизненный цикл заказов, расчет тарифов, Saga Orchestrator")
+        ContainerDb(orders_db, "Orders DB", "PostgreSQL", "База заказов")
+        
+        Container(wms_svc, "WMS & Inventory Service", "Go / gRPC", "Учет складских остатков, ячейки, комплектация")
+        ContainerDb(wms_db, "WMS DB", "PostgreSQL", "База склада")
+        
+        Container(routing_svc, "Logistics & Routing Service", "Go / gRPC", "Маршрутизация, гео-трекинг, назначение курьеров")
+        ContainerDb(routing_db, "Routing & Geo DB", "PostgreSQL / PostGIS", "База маршрутов")
+        
+        Container(billing_svc, "Billing & Payments Service", "Java / Spring Boot", "Биллинг, сплитование выплат, интеграция с банком")
+        ContainerDb(billing_db, "Billing DB", "PostgreSQL", "База платежей")
+        
+        Container(telematics_svc, "IoT Telematics Processing Service", "Rust / Go", "Обработка телеметрии, контроль температурного режима (Cold Chain)")
+        ContainerDb(iot_timescale, "IoT Time-Series DB", "ClickHouse / TimescaleDB", "Хранение временных рядов телеметрии")
+        
+        Container(edi_svc, "EDI Integration Adapter", "Java / Camel", "Валидация и трансформация DESADV/ORDERS/INVRPT")
+        Container(status_cache, "Real-Time Status Cache", "Redis Cluster", "Кэш статусов заказов и гео-координат (Latency < 50ms)")
+    }
+}
+
+' Внешние связи
+Rel(client, api_gateway, "Заказы и трекинг", "HTTPS")
+Rel(courier, api_gateway, "Статусы смены и фото", "HTTPS")
+Rel(iot_devices, mqtt_broker, "Телеметрия раз в секунду", "MQTT / TLS")
+Rel(edi_suppliers, api_gateway, "EDI документы", "HTTPS / mTLS")
+Rel(holding_crm, api_gateway, "Запрос статуса заказа (< 1с)", "HTTPS / REST")
+
+' Внутрисистемные связи
+Rel(api_gateway, pii_service, "Запрос профиля (по токену)", "gRPC / mTLS")
+Rel(api_gateway, orders_svc, "Создание/изменение заказов", "gRPC")
+Rel(api_gateway, status_cache, "Быстрое чтение статуса для CRM", "Redis Protocol")
+Rel(api_gateway, edi_svc, "Маршрутизация EDI", "gRPC")
+
+Rel(mqtt_broker, telematics_svc, "Поток телеметрии (3 000 RPS)", "Kafka Topic: iot-telemetry")
+Rel(telematics_svc, iot_timescale, "Запись временных рядов", "Native Batch")
+Rel(telematics_svc, status_cache, "Обновление гео-координат курьера", "Redis Protocol")
+
+Rel(orders_svc, kafka_backbone, "События: OrderCreated, StatusChanged", "Kafka Producer")
+Rel(wms_svc, kafka_backbone, "События: StockReserved, Assembled", "Kafka Producer/Consumer")
+Rel(routing_svc, kafka_backbone, "События: RouteAssigned, Delivered", "Kafka Producer/Consumer")
+Rel(billing_svc, kafka_backbone, "События: PaymentAuthorized", "Kafka Producer/Consumer")
+
+Rel(kafka_backbone, status_cache, "Потоковое обновление кэша статусов", "Consumer API")
+Rel(kafka_backbone, holding_dwh, "CDC / Потоковая выгрузка в DWH", "Kafka Connect")
+Rel(pii_service, pii_db, "CRUD персональных данных", "JDBC / TLS")
+
+@enduml
